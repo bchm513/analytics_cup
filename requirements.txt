@@ -1,0 +1,7 @@
+# Tested with Python 3.12
+pandas==3.0.2
+numpy==2.4.4
+matplotlib==3.10.8
+pyarrow==26.0.0
+ipykernel==7.4.0
+pytest==9.2.0

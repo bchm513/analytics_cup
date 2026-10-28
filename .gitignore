@@ -1,0 +1,16 @@
+# Data: SkillCorner data must never be committed (competition rules)
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors and OS
+.vscode/
+.DS_Store
+Thumbs.db
