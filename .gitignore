@@ -1,5 +1,10 @@
 # Data: SkillCorner data must never be committed (competition rules)
-data/
+data/opendata/
+data/cache/
+data/outputs/
+
+# Outputs
+figures/
 
 # Python
 .venv/
