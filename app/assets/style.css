@@ -1,0 +1,102 @@
+@import url("https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap");
+
+:root {
+  --paper: #f6f7f3;
+  --panel: #ffffff;
+  --ink: #1f2a24;
+  --muted: #637068;
+  --rule: #dfe5dc;
+  --turf: #eef3ec;
+  --teal: #2a9d8f;
+  --teal-ink: #1f7a6a;
+  --attack: #c8394e;
+  --defend: #2b6a94;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: "Barlow", sans-serif; font-size: 15px; }
+
+.shell { min-height: 100vh; display: flex; flex-direction: column; }
+
+/* Top bar: title on the left, the match picker on the right */
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px;
+          padding: 14px 24px; border-bottom: 1px solid var(--rule); background: var(--panel); }
+.topbar h1 { margin: 0; font-family: "Barlow Semi Condensed", sans-serif; font-weight: 700; font-size: 26px;
+             letter-spacing: 0.2px; }
+.match-select { width: 340px; font-size: 15px; }
+
+/* Three columns: plays | pitch | reading of the play */
+.body { flex: 1; display: grid; grid-template-columns: 290px minmax(0, 1fr) 330px; gap: 22px; padding: 18px 24px 24px; }
+.rail, .side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.rail h2, .side h2 { margin: 6px 0 0; font-family: "Barlow Semi Condensed", sans-serif; font-size: 18px; font-weight: 600; }
+.side h2:first-child, .rail h2:first-child { margin-top: 0; }
+
+/* Filter pills */
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pills label { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--rule);
+               border-radius: 999px; background: var(--panel); font-size: 13px; cursor: pointer; }
+.pills input { accent-color: var(--teal); margin: 0; }
+
+/* Plays list */
+.rail .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner table { font-family: "Barlow", sans-serif; }
+.rail .dash-spreadsheet-inner th { background: transparent !important; font-family: "Barlow Semi Condensed", sans-serif;
+                                   font-weight: 600 !important; color: var(--muted) !important; font-size: 13px; }
+.rail .dash-spreadsheet-inner td { font-size: 14px; padding: 6px 4px !important; cursor: pointer; }
+.rail .dash-spreadsheet-inner tr:hover td { background: #e9f3f1 !important; }
+.rail .dash-spreadsheet-inner td.focused, .rail .dash-spreadsheet-inner td.cell--selected {
+  border: none !important; box-shadow: none !important; outline: none !important; }
+.rail .dash-spreadsheet-inner td.cell--selected { background-color: inherit !important; }
+.rail .previous-next-container { font-size: 13px; }
+
+.jump { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.jump label { font-size: 13px; color: var(--muted); }
+.jump-row { display: flex; gap: 6px; margin-top: 6px; }
+.jump-row input { width: 120px; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 6px; font-family: inherit; }
+
+/* The pitch is the hero */
+.stage { display: flex; flex-direction: column; min-width: 0; }
+.stage-head { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 4px 16px; margin-bottom: 6px; }
+.play-title { font-family: "Barlow Semi Condensed", sans-serif; font-weight: 700; font-size: 24px; }
+.frame-title { grid-column: 1 / -1; color: var(--muted); font-size: 15px; white-space: pre; min-height: 20px; }
+.load-status { font-size: 13px; color: var(--muted); }
+.pitch { height: 64vh; min-height: 420px; background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; }
+
+/* Transport */
+.transport { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; flex-wrap: wrap; }
+button { font-family: "Barlow Semi Condensed", sans-serif; font-size: 15px; font-weight: 600; color: var(--ink);
+         background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button:hover { border-color: var(--teal); }
+button:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+button.primary { background: var(--teal-ink); border-color: var(--teal-ink); color: white; min-width: 84px; }
+.speed { width: 84px; }
+.jumps { display: flex; gap: 6px; margin-left: auto; }
+.jumps button { font-weight: 500; color: var(--muted); }
+.timeline { padding: 4px 0 0; }
+.timeline .rc-slider-track { background-color: var(--teal); }
+.timeline .rc-slider-handle { border-color: var(--teal-ink); }
+.timeline .rc-slider-mark-text { font-family: "Barlow Semi Condensed", sans-serif; font-size: 13px; color: var(--ink); }
+
+/* Reading of the play */
+.summary, .moment { font-size: 14px; line-height: 1.5; }
+.summary p, .moment p { margin: 0 0 6px; }
+.moment table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.moment th { text-align: left; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--rule); padding: 3px 4px; }
+.moment td { padding: 3px 4px; border-bottom: 1px solid #eef1ec; }
+.layers { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.layers input { accent-color: var(--teal); margin-right: 6px; }
+.hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
+
+@media (max-width: 1200px) {
+  .body { grid-template-columns: 1fr; }
+  .pitch { height: 56vh; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+/* Who-should-go-where table under the pitch: fixed height so nothing jumps */
+.moment-wrap { margin-top: 14px; }
+.moment-wrap h2 { margin: 0 0 6px; font-family: "Barlow Semi Condensed", sans-serif; font-size: 18px; font-weight: 600; }
+.moment-wrap .moment { min-height: 190px; }
+.moment-wrap table { table-layout: fixed; }
+.moment-wrap td, .moment-wrap th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
