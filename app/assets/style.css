@@ -41,11 +41,9 @@ body { margin: 0; background: var(--paper); color: var(--ink); font-family: "Bar
 .rail .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner table { font-family: "Barlow", sans-serif; }
 .rail .dash-spreadsheet-inner th { background: transparent !important; font-family: "Barlow Semi Condensed", sans-serif;
                                    font-weight: 600 !important; color: var(--muted) !important; font-size: 13px; }
-.rail .dash-spreadsheet-inner td { font-size: 14px; padding: 6px 4px !important; cursor: pointer; }
+.rail .dash-spreadsheet-inner td { font-size: 14px; padding: 6px 4px !important; cursor: pointer; background: transparent !important; }
 .rail .dash-spreadsheet-inner tr:hover td { background: #e9f3f1 !important; }
-.rail .dash-spreadsheet-inner td.focused, .rail .dash-spreadsheet-inner td.cell--selected {
-  border: none !important; box-shadow: none !important; outline: none !important; }
-.rail .dash-spreadsheet-inner td.cell--selected { background-color: inherit !important; }
+.rail .dash-spreadsheet-inner td.focused { background: #d6ece8 !important; border: none !important; }
 .rail .previous-next-container { font-size: 13px; }
 
 .jump { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--rule); }
@@ -93,10 +91,3 @@ button.primary { background: var(--teal-ink); border-color: var(--teal-ink); col
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
-
-/* Who-should-go-where table under the pitch: fixed height so nothing jumps */
-.moment-wrap { margin-top: 14px; }
-.moment-wrap h2 { margin: 0 0 6px; font-family: "Barlow Semi Condensed", sans-serif; font-size: 18px; font-weight: 600; }
-.moment-wrap .moment { min-height: 190px; }
-.moment-wrap table { table-layout: fixed; }
-.moment-wrap td, .moment-wrap th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

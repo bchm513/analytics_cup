@@ -5,7 +5,7 @@ on and off, and click players.
 
 ## Setup (once)
 
-1. Run `notebooks/space_creation.ipynb` top to bottom once. (You can stop at cell 12.1 if you want) The dashboard reads what it caches:
+1. Run `notebooks/space_creation.ipynb` top to bottom once. The dashboard reads what it caches:
    `data/cache/expected_positions.pkl`, `data/cache/<id>_tracking.npz`, `data/outputs/runs_enriched.pkl`,
    `data/outputs/passes.csv`.
 2. Install the two extra packages:
