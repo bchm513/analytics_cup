@@ -32,7 +32,7 @@ parser.add_argument("--debug", action="store_true")
 args, _ = parser.parse_known_args()
 
 core = loader.init(args.root)
-CTX = loader.ContextCache(size=3)
+CTX = loader.ContextCache(size=3) 
 PLAYS: dict = {}
 
 
