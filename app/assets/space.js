@@ -65,24 +65,28 @@ function baseLayout(shapes, anns) {
   };
 }
 
+const TABLE_ROWS = 5;
+
 function benTable(bens) {
-  if (!bens || !bens.length) return "";
-  let t = "\n\n| Teammate | Share | To reach | Gets there first | Control there |\n|---|---|---|---|---|\n";
-  for (const b of bens) {
-    t += `| ${b.name} | ${Math.round(b.share * 100)}% | ${b.t.toFixed(1)} s | ${Math.round(b.first * 100)}% | ` +
-         `${Math.round(b.ctrl * 100)}% |\n`;
+  // Always the same size, so the page never jumps: empty rows read NA.
+  let t = "| Teammate | Share | To reach | Gets there first | Control there |\n|---|---|---|---|---|\n";
+  for (let n = 0; n < TABLE_ROWS; n++) {
+    const b = bens && bens[n];
+    t += b ? `| ${b.name} | ${Math.round(b.share * 100)}% | ${b.t.toFixed(1)} s | ${Math.round(b.first * 100)}% | ` +
+             `${Math.round(b.ctrl * 100)}% |\n`
+           : "| NA | NA | NA | NA | NA |\n";
   }
   return t;
 }
 
 window.dash_clientside = Object.assign({}, window.dash_clientside, {
   space: {
-    render: function (data, k, layers, sel, reach) {
+    render: function (data, k, layers, items, sel, reach) {
       if (!data || !data.frames || !data.frames.length) {
-        return [emptyFigure(), "Pick a play from the list, or go to a moment by its match clock.", ""];
+        return [emptyFigure(), benTable(null), "", "Pick a play from the list, or go to a moment by its match clock."];
       }
       k = Math.max(0, Math.min(k || 0, data.frames.length - 1));
-      const f = data.frames[k], g = data.grid, L = new Set(layers || []);
+      const f = data.frames[k], g = data.grid, L = new Set((layers || []).concat(items || []));
       const traces = [], anns = [], shapes = pitchShapes();
 
       if (L.has("pc") && f.pc) {
@@ -97,17 +101,42 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
       }
 
       // the movement's path so far
-      if (data.runner_path && data.runner_path.length && k >= data.a_pos) {
+      // team plays: every mover's path so far
+      if (L.has("path") && data.paths) {
+        for (const p of data.paths) {
+          if (k < p.a_pos) continue;
+          const n = Math.min(k, p.e_pos) - p.a_pos + 1;
+          const seg = p.path.slice(0, Math.max(n, 0));
+          traces.push({type: "scatter", mode: "lines", x: seg.map(q => q[0]), y: seg.map(q => q[1]), hoverinfo: "skip",
+                       line: {color: p.kind === "carry" ? "#e07a1f" : C.att, width: 2.6,
+                              dash: p.kind === "carry" ? "solid" : "dot"}});
+        }
+      }
+      if (L.has("path") && data.runner_path && data.runner_path.length && k >= data.a_pos) {
         const n = Math.min(k, data.e_pos) - data.a_pos + 1;
         const p = data.runner_path.slice(0, Math.max(n, 0));
         traces.push({type: "scatter", mode: "lines", x: p.map(q => q[0]), y: p.map(q => q[1]), hoverinfo: "skip",
                      line: {color: data.movement === "carry" ? "#e07a1f" : C.att, width: 3,
                             dash: data.movement === "carry" ? "solid" : "dot"}});
       }
+      // faint lines from each mover to the defenders he is pulling
+      if (L.has("links") && f.drag) {
+        const at = {};
+        for (const p of f.players) at[p[0]] = p;
+        for (const d of f.drag) {
+          const m = at[d[5]];
+          if (!m) continue;
+          traces.push({type: "scatter", mode: "lines", x: [m[2], d[2]], y: [m[3], d[3]], hoverinfo: "skip",
+                       line: {color: "rgba(200,57,78,0.35)", width: 1.3, dash: "dot"}});
+        }
+      }
       if (L.has("drag") && f.drag) {
         for (const d of f.drag) {
+          const who = data.names[d[4]] || "This defender";
+          const by = d[5] && data.names[d[5]] ? ` (pulled by ${data.names[d[5]]})` : "";
           traces.push({type: "scatter", mode: "markers", x: [d[0]], y: [d[1]], hoverinfo: "text",
-                       hovertext: "where this defender should have been",
+                       customdata: [d[4]],
+                       hovertext: `${who}, ${data.roles[d[4]] || ""}: where he should have been${by}`,
                        marker: {size: 12, color: "rgba(0,0,0,0)", line: {color: C.def, width: 2}}});
           anns.push(arrowAnn(d[0], d[1], d[2], d[3], C.def, 2));
         }
@@ -123,6 +152,8 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
       }
       if (L.has("bens") && f.bens) {
         f.bens.forEach((b, n) => {
+          // by default only the best suggestion; "Show every suggested run" adds the others
+          if (n > 0 && !L.has("bens_all")) return;
           if (n > 2 || (n > 0 && b.share < 0.15)) return;
           const w = n === 0 ? 3 : 1.8;
           traces.push({type: "scatter", mode: "lines", x: [b.x0, b.x1], y: [b.y0, b.y1], hoverinfo: "skip",
@@ -144,6 +175,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
 
       // players last, so they sit on top and are easy to click
       for (const side of ["a", "d"]) {
+        if (!L.has(side === "a" ? "attackers" : "defenders")) continue;
         const ps = f.players.filter(p => p[1] === side);
         traces.push({type: "scatter", mode: "markers+text", x: ps.map(p => p[2]), y: ps.map(p => p[3]),
                      text: ps.map(p => p[4]), textfont: {color: "white", size: 10, family: "Barlow Semi Condensed"},
@@ -151,7 +183,12 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                      hovertext: ps.map(p => `${data.names[p[0]] || p[0]}, ${data.roles[p[0]] || ""}, ${p[5]} m/s`),
                      marker: {size: 19, color: side === "a" ? C.att : C.def, line: {color: "white", width: 1.5}}});
       }
-      if (f.runner) {
+      if (f.movers && f.movers.length && L.has("attackers")) {
+        const ms = f.players.filter(p => f.movers.includes(p[0]));
+        traces.push({type: "scatter", mode: "markers", x: ms.map(p => p[2]), y: ms.map(p => p[3]), hoverinfo: "skip",
+                     marker: {size: 32, color: "rgba(0,0,0,0)", line: {color: C.ink, width: 2.5}}});
+      }
+      if (f.runner && L.has("attackers")) {
         traces.push({type: "scatter", mode: "markers", x: [f.runner[0]], y: [f.runner[1]], hoverinfo: "skip",
                      marker: {size: 32, color: "rgba(0,0,0,0)", line: {color: C.ink, width: 2.5}}});
       }
@@ -160,30 +197,31 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
         traces.push({type: "scatter", mode: "markers", x: [me[2]], y: [me[3]], hoverinfo: "skip",
                      marker: {size: 34, color: "rgba(0,0,0,0)", line: {color: `rgb(${C.reach})`, width: 3}}});
       }
-      traces.push({type: "scatter", mode: "markers", x: [f.ball[0]], y: [f.ball[1]], hoverinfo: "skip",
-                   marker: {size: 10, color: "white", line: {color: C.ink, width: 2}}});
+      if (L.has("ball")) {
+        traces.push({type: "scatter", mode: "markers", x: [f.ball[0]], y: [f.ball[1]], hoverinfo: "skip",
+                     marker: {size: 10, color: "white", line: {color: C.ink, width: 2}}});
+      }
 
-      // text panel for this moment
-      let md = f.live ? "" : (f.stage.startsWith("After the pass") ? "The ball has been played." : "");
-      md += benTable(f.bens);
+      // who-should-go-where table (fixed size) and the selected player's card
+      const table = benTable(f.bens);
+      let card = "Click a player on the pitch to follow him.";
       if (me) {
         const nm = data.names[me[0]] || me[0];
-        md += `\n\n**${nm}**, ${data.roles[me[0]] || ""}, moving at ${me[5]} m/s`;
+        card = `**${nm}**, ${data.roles[me[0]] || ""}, moving at ${me[5]} m/s`;
         if (me[1] === "a") {
           const b = (f.bens || []).find(x => x.pid === me[0]);
-          md += "\n\nPurple shows where he can arrive before the quickest defender.";
-          if (b) md += ` In the opened space he has ${Math.round(b.share * 100)}% of the usable room, ` +
-                       `${b.t.toFixed(1)} s from his best spot.`;
+          card += "\n\nPurple shows where he can arrive before the quickest defender.";
+          if (b) card += ` In the opened space he has ${Math.round(b.share * 100)}% of the usable room, ` +
+                         `${b.t.toFixed(1)} s from his best spot.`;
         } else {
           const e = (f.exp || []).find(x => x[0] === me[0]);
           if (e) {
             const d = Math.hypot(e[1] - me[2], e[2] - me[3]);
-            md += `\n\nHe is ${d.toFixed(1)} m from where a defender in his role usually stands with the ball here.`;
+            card += `\n\nHe is ${d.toFixed(1)} m from where a defender in his role usually stands with the ball here.`;
           }
         }
       }
-      return [{data: traces, layout: baseLayout(shapes, anns)}, md || "Nothing to report at this frame.",
-              `${f.clock}   ${f.stage}`];
+      return [{data: traces, layout: baseLayout(shapes, anns)}, table, `${f.clock}   ${f.stage}`, card];
     },
 
     timeline: function (data) {

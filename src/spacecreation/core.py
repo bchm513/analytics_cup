@@ -22,6 +22,8 @@ import zipfile
 
 from dataclasses import dataclass, field
 
+from types import SimpleNamespace
+
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -86,7 +88,21 @@ MIN_SEP = 4.0
 
 OCCUPIED_R = 5.0
 
-PIPELINE_VERSION = "v2"
+PIPELINE_VERSION = "v6"
+
+ABNORMAL_MIN_M = 3.0
+
+DEV_GROWTH_MIN = 1.0
+
+BEN_EXCLUDE_GROUPS = ("GK", "CB")
+
+KEEPER_BUFFER_M = 1.0
+
+TEAMPLAY_JOIN_S = 1.0
+
+TEAMPLAY_LEAD_S = 1.0
+
+TEAMPLAY_BUFFER_S = 1.0
 
 RUN_MIN_SPEED = 4.0
 
@@ -605,6 +621,8 @@ def detect_carries(trk: Tracking, meta: MatchMeta, events: pd.DataFrame) -> list
 def detect_movements(trk: Tracking, meta: MatchMeta, events: pd.DataFrame) -> pd.DataFrame:
     onball = possession_mask(trk, events)
     df = pd.DataFrame(detect_runs(trk, meta, onball) + detect_carries(trk, meta, events))
+    if len(df):                                   # keepers are never part of the drawing scheme
+        df = df[df.role != "GK"]
     return df.reset_index(drop=True)
 
 def match_sk_runs(runs: pd.DataFrame, events: pd.DataFrame, min_iou: float = 0.3) -> pd.DataFrame:
@@ -679,6 +697,15 @@ class MatchContext:
                 out[k] = pos[mates[m]] + v * MIN_SEP
         return out
 
+def keeper_mask(ctx: MatchContext, st: dict) -> np.ndarray:
+    """1 everywhere except behind the defending keeper (between him and his goal line, minus KEEPER_BUFFER_M):
+    space there is never something a team can use."""
+    trk, pts = ctx.trk, ctx.grid.points
+    gk = [k for k in st["dfn"] if ctx.role.get(trk.player_ids[k]) == "GK" and not np.isnan(st["pos"][k, 0])]
+    if not gk:
+        return np.ones(len(pts))
+    return (pts[:, 0] < st["pos"][gk[0], 0] - KEEPER_BUFFER_M).astype(float)
+
 def coarse_sample(ctx: MatchContext, m: np.ndarray) -> np.ndarray:
     return m[ctx.grid.cell(ctx.coarse.points)]
 
@@ -700,12 +727,30 @@ def score_run(ctx: MatchContext, run) -> dict:
     nearest = np.nanargmin(np.where(np.isnan(dist), np.inf, dist), axis=2)
     runner_pos = int(np.flatnonzero(st["att"] == j)[0])
     share = (nearest == runner_pos).mean(0)
-    disp_def = D[-1] - D[0]
-    disp_run = np.array([run.dx, run.dy])
-    cos = (disp_def @ disp_run) / (np.linalg.norm(disp_def, axis=1) * np.linalg.norm(disp_run) + 1e-9)
+    # Movement relative to each team's own shift. When a whole team pushes up and the other drops, everyone moves
+    # but nobody moves *differently*: those movements are not dragging. Shift = change in the centre of the team's
+    # outfield players (excluding the player himself).
+    P0 = trk.pos[a] * s
+
+    def outfield(cols):
+        return np.array([k for k in cols if ctx.role.get(trk.player_ids[k]) != "GK"], int)
+
+    def shift_without(cols, k):
+        ok = [c for c in outfield(cols) if c != k and not np.isnan(P0[c, 0]) and not np.isnan(P[c, 0])]
+        return (P[ok].mean(0) - P0[ok].mean(0)) if ok else np.zeros(2)
+
+    rel_run = (P[j] - P0[j]) - shift_without(st["att"], j)
+    abnormal = bool(np.linalg.norm(rel_run) >= ABNORMAL_MIN_M)
+    rel_def = np.array([(P[k] - P0[k]) - shift_without(dfn, k) for k in dfn]) if len(dfn) else np.zeros((0, 2))
+    cos = (rel_def @ rel_run) / (np.linalg.norm(rel_def, axis=1) * np.linalg.norm(rel_run) + 1e-9)
+    moved = np.linalg.norm(rel_def, axis=1) >= DRAG_MIN_DISP          # moved differently from his own line
     dev = np.linalg.norm(P[dfn] - E, axis=1)
-    moved = np.linalg.norm(disp_def, axis=1) >= DRAG_MIN_DISP
-    out_of_shape = (dev >= DRAG_MIN_DEV) & ~np.isnan(E[:, 0])
+    # ...and got further out of position during the movement, not just ended out of it
+    st0 = frame_state(trk, a, run.team_id)
+    E0 = ctx.expected(dfn, "out", st0["ball"], trk.phase[a], P0)
+    dev0 = np.linalg.norm(P0[dfn] - E0, axis=1)
+    grew = np.nan_to_num(dev - dev0, nan=0.0) >= DEV_GROWTH_MIN
+    out_of_shape = (dev >= DRAG_MIN_DEV) & ~np.isnan(E[:, 0]) & grew
     if run.kind == "carry":
         # A carrier *draws* defenders: they close him down rather than follow his path.
         d0 = np.linalg.norm(D[0] - A[0, runner_pos], axis=1)
@@ -713,8 +758,10 @@ def score_run(ctx: MatchContext, run) -> dict:
         drawn = ((d0 - d1) >= DRAW_MIN_CLOSE) & (d1 <= DRAW_MAX_DIST)
         dragged = (drawn | (share >= DRAG_MIN_SHARE)) & moved & out_of_shape
     else:
-        # An off-ball runner *drags* defenders: they track him and move with him.
+        # An off-ball runner *drags* defenders: they track him and move with him (relative to their own teams).
         dragged = (share >= DRAG_MIN_SHARE) & moved & (cos >= DRAG_MIN_COS) & out_of_shape
+    if not abnormal:                     # moving with his team is not trying to make space: nobody is credited
+        dragged = np.zeros(len(dfn), bool)
 
     # Being pulled by the run is not enough: if another defender now stands where this one should have been, the
     # spot is still held and the run opened no space there. Those defenders are not credited.
@@ -725,6 +772,8 @@ def score_run(ctx: MatchContext, run) -> dict:
         if len(others) and np.linalg.norm(others - E[k], axis=1).min() < OCCUPIED_R:
             covered_drag[k] = True
     dragged = dragged & ~covered_drag
+    # Keepers are never part of the drawing scheme
+    dragged = dragged & np.array([ctx.role.get(trk.player_ids[k]) != "GK" for k in dfn], bool)
 
     def pc_with(def_xy, def_v):
         return pitch_control(P[att], V[att], def_xy, def_v, ball, pts)
@@ -740,7 +789,7 @@ def score_run(ctx: MatchContext, run) -> dict:
     team_use = 1 - np.exp(-influence(P[att], V[att], ball, pts).sum(0))
     vg, ca = ctx.value_grid * team_use, ctx.grid.cell_area
     v_actual, v_drag, v_all = space_value(pc_actual, vg, ca), space_value(pc_drag, vg, ca), space_value(pc_all, vg, ca)
-    created_map = pc_actual - pc_drag
+    created_map = (pc_actual - pc_drag) * keeper_mask(ctx, st)     # never space behind the keeper
 
     # Naive comparison: change in teammates' space from run start to run end
     st0 = frame_state(trk, a, run.team_id)
@@ -764,7 +813,8 @@ def score_run(ctx: MatchContext, run) -> dict:
     centroid = (pos_mass[:, None] * pts).sum(0) / pos_mass.sum() if pos_mass.sum() > 0 else np.array([np.nan] * 2)
     ctx.created_maps[run.Index] = (e, run.team_id, run.player_id, created_map.astype(np.float32))
     return dict(created=v_actual - v_drag, conceded=v_drag - v_all, baseline=v_all, v_actual=v_actual,
-                naive_change=v_actual - v_start, n_dragged=int(dragged.sum()),
+                naive_change=v_actual - v_start, n_dragged=int(dragged.sum()), abnormal=abnormal,
+                rel_move_m=float(np.linalg.norm(rel_run)),
                 n_dragged_covered=int(covered_drag.sum()),
                 dragged_ids=list(trk.player_ids[dfn][dragged]),
                 dragged_detected=float(st["det"][dfn][dragged].mean()) if dragged.any() else np.nan,
@@ -1213,7 +1263,7 @@ PAUSE_START_S, PAUSE_PEAK_S = 0.8, 2.5
 
 PEAK_SEARCH_S = 2.0
 
-TOP_BENEFICIARIES = 3
+TOP_BENEFICIARIES = 1
 
 MIN_BEN_SHARE = 0.15
 
@@ -1229,14 +1279,16 @@ TEAM_CLEAR_M = 3.0
 
 CROWD_FACTOR = 0.2
 
-def find_beneficiary(ctx, run, i, created) -> dict | None:
+def find_beneficiary(ctx, run, i, created, exclude_pids=()) -> dict | None:
     """Teammates who can use the opened space. Each spot counts by
     (space created there) × value × how free it is now (attacking control above 0.5, no defender within 3 m)
     × his chance of getting there first × (reduced if another teammate is already there).
     Returns the main beneficiary plus a ranking with each teammate's best target spot."""
     trk, pts = ctx.trk, ctx.grid.points
     st = frame_state(trk, i, run.team_id)
-    att = np.array([k for k in st["att"] if trk.player_ids[k] != run.player_id
+    excl = set(int(p) for p in exclude_pids) | {int(run.player_id)}
+    att = np.array([k for k in st["att"] if int(trk.player_ids[k]) not in excl
+                    and ROLE_GROUP.get(ctx.role.get(trk.player_ids[k]), "OTHER") not in BEN_EXCLUDE_GROUPS
                     and ctx.role.get(trk.player_ids[k]) != "GK"])
     if len(att) == 0:
         return None
@@ -1305,7 +1357,8 @@ def run_scene(ctx, run, i, with_created=False):
     att = np.array([k for k in st["att"] if k != j])
     P, V, ball = st["pos"], st["vel"], st["ball"]
     pc = pitch_control(P[att], V[att], P[st["dfn"]], V[st["dfn"]], ball, g.points)
-    drag_cols = [k for k in st["dfn"] if trk.player_ids[k] in set(run.dragged_ids)]
+    drag_cols = [k for k in st["dfn"] if trk.player_ids[k] in set(run.dragged_ids)
+                 and ctx.role.get(trk.player_ids[k]) != "GK"]
     exp = ctx.expected(drag_cols, "out", ball, trk.phase[i], P) if drag_cols else np.zeros((0, 2))
     a, e = int(run.idx_start), int(run.idx_end)
     trail = trk.pos[a:min(i, e) + 1, j] * st["sign"] if i >= a else np.zeros((0, 2))
@@ -1318,7 +1371,7 @@ def run_scene(ctx, run, i, with_created=False):
             sel = np.isin(st["dfn"], drag_cols)
             ok = ~np.isnan(exp[:, 0])
             Dr[np.flatnonzero(sel)[ok]], Dv[np.flatnonzero(sel)[ok]] = exp[ok], 0
-            scene["created"] = pc - pitch_control(P[att], V[att], Dr, Dv, ball, g.points)
+            scene["created"] = (pc - pitch_control(P[att], V[att], Dr, Dv, ball, g.points)) * keeper_mask(ctx, st)
     return scene
 
 def designed_map(ctx, run, i):
@@ -1335,7 +1388,7 @@ def designed_map(ctx, run, i):
     i_exp = influence(Er[None], np.zeros((1, 2)), ball, pts)[0]
     i_act = influence(P[[j]], V[[j]], ball, pts)[0]
     team_use = 1 - np.exp(-influence(P[att], V[att], ball, pts).sum(0))
-    return np.clip(i_exp - i_act, 0, None) * team_use
+    return np.clip(i_exp - i_act, 0, None) * team_use * keeper_mask(ctx, st)
 
 def pass_cutoff(ctx, run):
     """Index of the first pass by the movement's team from the start of the movement (None if there isn't one in the
@@ -1685,6 +1738,85 @@ def pick_cases(runs: pd.DataFrame, n: int = 10, per_kind=(5, 5), max_per_player:
     if len(out) < n:   # top up from whichever kind has more cases
         out = pd.concat([out, pool.drop(out.index).groupby("player_id").head(max_per_player).head(n - len(out))])
     return out.head(n)
+
+def build_team_plays(runs: pd.DataFrame, passes: pd.DataFrame) -> pd.DataFrame:
+    """Group movements into team plays. Within one match and one team, movements are taken in order of their start;
+    each movement's analysis ends at the team's first pass after it starts (or PEAK_SEARCH_S after it ends, if no pass).
+    A movement joins the current play if it starts within TEAMPLAY_JOIN_S of the play's end and before the play's
+    first pass; otherwise it starts a new play. Different teams never share a play."""
+    rows = []
+    P = passes.sort_values("frame_pass") if len(passes) else passes
+    for (mid, team), g in runs[runs.role != "GK"].sort_values("frame_start").groupby(["match_id", "team_id"]):
+        tp = P[(P.match_id == mid) & (P.team_id == team)].frame_pass.values if len(P) else np.array([])
+        cur = None
+        for k, r in zip(g.index, g.itertuples()):
+            nxt = tp[tp >= r.frame_start]
+            pass_f = int(nxt[0]) if len(nxt) else None
+            end = min(pass_f, r.frame_end + int(PEAK_SEARCH_S * FPS)) if pass_f is not None \
+                else r.frame_end + int(PEAK_SEARCH_S * FPS)
+            if (cur is not None and r.period == cur["period"]
+                    and r.frame_start <= cur["frame_end"] + int(TEAMPLAY_JOIN_S * FPS)
+                    and (cur["pass_frame"] is None or r.frame_start < cur["pass_frame"])):
+                cur["members"].append(k)
+                cur["frame_end"] = max(cur["frame_end"], end)
+                if cur["pass_frame"] is not None:
+                    cur["frame_end"] = min(cur["frame_end"], cur["pass_frame"])
+            else:
+                cur = dict(match_id=int(mid), team_id=int(team), period=int(r.period), frame_start=int(r.frame_start),
+                           frame_end=int(end), pass_frame=pass_f, members=[k])
+                rows.append(cur)
+    out = pd.DataFrame(rows)
+    if len(out):
+        ab = runs["abnormal"] if "abnormal" in runs else pd.Series(True, index=runs.index)
+        out["n_moves"] = out.members.apply(lambda m: int(ab.loc[m].sum()))
+        out["movers"] = out.members.apply(lambda m: sorted(set(int(p) for p in runs.loc[m, "player_id"])))
+        out["n_dragged"] = out.members.apply(lambda m: int(runs.loc[m, "n_dragged"].sum()))
+        out["space"] = out.members.apply(lambda m: float(runs.loc[m, "created_opp_half"].clip(lower=0).sum()))
+        out["attacking_half"] = out.members.apply(lambda m: bool(runs.loc[m, "attacking_half"].any()))
+        out["phase"] = out.members.apply(lambda m: runs.loc[m[0], "phase"])
+    return out
+
+def team_scene(ctx, tp, i, with_created=True):
+    """One frame of a team play, in the attacking frame of the team in possession: every mover active so far, every
+    defender a mover has pulled (credited in scoring) with his expected spot, and the space all of those pulls open
+    together for the players who are NOT movers."""
+    trk, g = ctx.trk, ctx.grid
+    team = int(tp["team_id"])
+    st = frame_state(trk, i, team)
+    P, V, ball = st["pos"], st["vel"], st["ball"]
+    f = trk.frames[i]
+    # Only abnormal movements count as movers: players just moving up with their team are ordinary teammates here
+    started = [k for k in tp["members"] if RUNS.at[k, "frame_start"] <= f and bool(RUNS.at[k, "abnormal"])]
+    movers = set(int(RUNS.at[k, "player_id"]) for k in started)
+    pulled_by = {}
+    for k in started:
+        for d in RUNS.at[k, "dragged_ids"]:
+            pulled_by.setdefault(int(d), int(RUNS.at[k, "player_id"]))
+    drag_cols = [k for k in st["dfn"] if int(trk.player_ids[k]) in pulled_by
+                 and ctx.role.get(trk.player_ids[k]) != "GK" and not np.isnan(P[k, 0])]
+    exp = ctx.expected(drag_cols, "out", ball, trk.phase[i], P) if drag_cols else np.zeros((0, 2))
+    others = np.array([k for k in st["att"] if int(trk.player_ids[k]) not in movers])
+    pc = pitch_control(P[others], V[others], P[st["dfn"]], V[st["dfn"]], ball, g.points) if len(others) \
+        else np.zeros(len(g.points))
+    scene = dict(P=P, att=st["att"], dfn=st["dfn"], ball=ball, pc=pc, movers=movers,
+                 drag=[(int(trk.player_ids[k]), exp[n], P[k], pulled_by[int(trk.player_ids[k])])
+                       for n, k in enumerate(drag_cols) if not np.isnan(exp[n, 0])])
+    if with_created:
+        scene["created"] = np.zeros(len(g.points))
+        ok = [n for n in range(len(drag_cols)) if not np.isnan(exp[n, 0])]
+        if ok and len(others):
+            Dr, Dv = P[st["dfn"]].copy(), V[st["dfn"]].copy()
+            for n in ok:
+                q = int(np.flatnonzero(st["dfn"] == drag_cols[n])[0])
+                Dr[q], Dv[q] = exp[n], 0
+            scene["created"] = ((pc - pitch_control(P[others], V[others], Dr, Dv, ball, g.points))
+                                * keeper_mask(ctx, st))
+    return scene
+
+def team_play_beneficiaries(ctx, tp, i, created, movers):
+    """Who should run into the space at frame i of a team play: never a mover, a centre-back or a keeper."""
+    pseudo = SimpleNamespace(team_id=int(tp["team_id"]), player_id=-1, match_id=int(tp["match_id"]))
+    return find_beneficiary(ctx, pseudo, i, created, exclude_pids=movers)
 
 SHOWCASE_N = 12
 

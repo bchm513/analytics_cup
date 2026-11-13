@@ -26,7 +26,7 @@ body { margin: 0; background: var(--paper); color: var(--ink); font-family: "Bar
 .match-select { width: 340px; font-size: 15px; }
 
 /* Three columns: plays | pitch | reading of the play */
-.body { flex: 1; display: grid; grid-template-columns: 290px minmax(0, 1fr) 330px; gap: 22px; padding: 18px 24px 24px; }
+.body { flex: 1; display: grid; grid-template-columns: 340px minmax(0, 1fr) 330px; gap: 22px; padding: 18px 24px 24px; }
 .rail, .side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .rail h2, .side h2 { margin: 6px 0 0; font-family: "Barlow Semi Condensed", sans-serif; font-size: 18px; font-weight: 600; }
 .side h2:first-child, .rail h2:first-child { margin-top: 0; }
@@ -41,9 +41,11 @@ body { margin: 0; background: var(--paper); color: var(--ink); font-family: "Bar
 .rail .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner table { font-family: "Barlow", sans-serif; }
 .rail .dash-spreadsheet-inner th { background: transparent !important; font-family: "Barlow Semi Condensed", sans-serif;
                                    font-weight: 600 !important; color: var(--muted) !important; font-size: 13px; }
-.rail .dash-spreadsheet-inner td { font-size: 14px; padding: 6px 4px !important; cursor: pointer; background: transparent !important; }
+.rail .dash-spreadsheet-inner td { font-size: 14px; padding: 6px 4px !important; cursor: pointer; }
 .rail .dash-spreadsheet-inner tr:hover td { background: #e9f3f1 !important; }
-.rail .dash-spreadsheet-inner td.focused { background: #d6ece8 !important; border: none !important; }
+.rail .dash-spreadsheet-inner td.focused, .rail .dash-spreadsheet-inner td.cell--selected {
+  border: none !important; box-shadow: none !important; outline: none !important; }
+.rail .dash-spreadsheet-inner td.cell--selected { background-color: inherit !important; }
 .rail .previous-next-container { font-size: 13px; }
 
 .jump { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--rule); }
@@ -91,3 +93,31 @@ button.primary { background: var(--teal-ink); border-color: var(--teal-ink); col
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* Who-should-go-where table under the pitch: fixed height so nothing jumps */
+.moment-wrap { margin-top: 14px; }
+.moment-wrap h2 { margin: 0 0 6px; font-family: "Barlow Semi Condensed", sans-serif; font-size: 18px; font-weight: 600; }
+.moment-wrap .moment { min-height: 190px; }
+.moment-wrap table { table-layout: fixed; }
+.moment-wrap td, .moment-wrap th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Tabs: team plays | individual movements */
+.mode-tabs { margin-bottom: 6px; }
+.mode-tab { font-family: "Barlow Semi Condensed", sans-serif !important; font-weight: 600; font-size: 15px;
+            padding: 6px 10px !important; border: 1px solid var(--rule) !important; background: var(--panel) !important;
+            color: var(--muted) !important; }
+.mode-tab--on { color: var(--ink) !important; border-bottom: 3px solid var(--teal) !important; }
+.plays-status { font-size: 13px; color: var(--muted); min-height: 18px; }
+
+/* Spinner centred on the pitch, without covering it when idle */
+.pitch-wrap { position: relative; }
+.pitch-spinner { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); pointer-events: none;
+                 width: 1px; height: 1px; }
+.pitch-spinner .load-status { width: 1px; height: 1px; overflow: hidden; }
+
+/* Spinner over the plays list while it is being built */
+.list-loading { min-height: 120px; }
+
+/* Keep the plays lists inside their column */
+.rail .dash-table-container, .rail .dash-spreadsheet-container, .rail .dash-spreadsheet-inner { max-width: 100%; }
+.rail .dash-spreadsheet-inner td, .rail .dash-spreadsheet-inner th { font-size: 13px; }

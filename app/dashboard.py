@@ -128,9 +128,11 @@ def precompute_play(idx):
             if i in ov["O"]:
                 f["prime"] = enc(ov["O"][i])
             dragged = set(run.dragged_ids)
-            drag_ids = [int(trk.player_ids[k]) for k in st["dfn"] if trk.player_ids[k] in dragged]
-            f["drag"] = [r2(list(ex) + list(now)) + [pid] for ex, now, pid in zip(sc["drag_exp"], sc["drag_now"], drag_ids)
-                         if not np.isnan(ex[0])]
+            drag_ids = [int(trk.player_ids[k]) for k in st["dfn"] if trk.player_ids[k] in dragged
+                        and c.role.get(trk.player_ids[k]) != "GK"]
+            # [expected x, y, actual x, y, defender, the mover pulling him]
+            f["drag"] = [r2(list(ex) + list(now)) + [pid, int(run.player_id)]
+                         for ex, now, pid in zip(sc["drag_exp"], sc["drag_now"], drag_ids) if not np.isnan(ex[0])]
             gain = np.clip(sc["created"], 0, None) * c.value_grid
             if gain.sum() >= core.LIVE_MIN_FRAC * play["gpeak"]:
                 ben = core.find_beneficiary(c, run, i, sc["created"])
@@ -174,6 +176,141 @@ def precompute_play(idx):
                 grid=dict(xs=r2(g.xs), ys=r2(g.ys), nx=g.nx, ny=g.ny), frames=frames, marks=marks,
                 start=pos.get(a, 0), runner_path=path, a_pos=pos.get(a, 0), e_pos=pos.get(e, len(idxs) - 1),
                 movement="carry" if run.kind == "carry" else "run", runner=int(run.player_id),
+                summary="  \n".join(summary), names={str(p): name(p) for p in core.mins.index},
+                roles={str(p): str(r) for p, r in core.mins["role"].items()})
+
+
+@lru_cache(maxsize=None)
+def period_starts(mid):
+    """First frame of each period, read straight from the cached tracking file (much faster than loading the match)."""
+    path = core.CACHE_DIR / f"{mid}_tracking.npz"
+    if path.exists():
+        z = np.load(path, allow_pickle=True)
+        fr, per = z["frames"], z["period"]
+    else:
+        trk = CTX.get(mid).trk
+        fr, per = trk.frames, trk.period
+    return {int(p): int(fr[per == p].min()) for p in np.unique(per)}
+
+
+def clock_of(mid, frame, period):
+    """Same match clock as core.match_clock, from a frame number and period."""
+    secs = (int(frame) - period_starts(mid)[int(period)]) / core.FPS + (45 * 60 if int(period) == 2 else 0)
+    return f"P{int(period)} {int(secs // 60):02d}:{int(secs % 60):02d}"
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Team plays: every movement by one team in the same moment of play
+# ---------------------------------------------------------------------------------------------------------------------
+@lru_cache(maxsize=32)
+def team_plays_for_match(mid):
+    R = core.RUNS[core.RUNS.match_id == mid]
+    Pm = core.PASSES[core.PASSES.match_id == mid] if len(core.PASSES) else core.PASSES
+    return core.build_team_plays(R, Pm)
+
+
+def precompute_teamplay(mid, k):
+    tp = team_plays_for_match(mid).loc[k]
+    c = CTX.get(mid)
+    trk, g = c.trk, c.grid
+    team = int(tp.team_id)
+    i_start, i_end = int(trk.idx(int(tp.frame_start))), int(trk.idx(int(tp.frame_end)))
+    same = np.flatnonzero(trk.period == trk.period[i_start])
+    lo = int(max(i_start - core.TEAMPLAY_LEAD_S * core.FPS, same[0]))
+    hi = int(min(i_end + core.TEAMPLAY_BUFFER_S * core.FPS, same[-1]))
+    idxs = list(range(lo, hi + 1))
+    tpd = dict(team_id=team, match_id=int(mid), members=list(tp.members))
+    sign = trk.direction.get((team, int(trk.period[i_start])), 1)
+
+    scenes = {i: core.team_scene(c, tpd, i, with_created=i_start <= i <= i_end) for i in idxs}
+    gains = {i: np.clip(sc["created"], 0, None) * c.value_grid for i, sc in scenes.items() if "created" in sc}
+    gmax = max((float(v.max()) for v in gains.values()), default=1e-12) or 1e-12
+    peak = max(gains, key=lambda i: gains[i].sum()) if gains else i_start
+    gpeak = float(gains[peak].sum()) if gains else 0.0
+
+    pass_row = None
+    if tp.pass_frame is not None and len(core.PASSES):
+        pr = core.PASSES[(core.PASSES.match_id == mid) & (core.PASSES.team_id == team)
+                         & (core.PASSES.frame_pass == tp.pass_frame)]
+        pass_row = pr.iloc[0] if len(pr) else None
+    i_pass = int(trk.idx(int(tp.pass_frame))) if tp.pass_frame is not None else None
+
+    paths = []
+    pos = {i: n for n, i in enumerate(idxs)}
+    abnormal = [m for m in tp.members if bool(core.RUNS.at[m, "abnormal"])] if "abnormal" in core.RUNS \
+        else list(tp.members)
+    for m in abnormal:                            # only movements that stand out from the team's own shift
+        r = core.RUNS.loc[m]
+        a, e = int(r.idx_start), int(r.idx_end)
+        j = int(np.flatnonzero(trk.player_ids == r.player_id)[0])
+        a_pos = pos.get(a, 0 if a < lo else None)
+        if a_pos is None:
+            continue
+        paths.append(dict(pid=int(r.player_id), kind="carry" if r.kind == "carry" else "run", a_pos=pos.get(a, 0),
+                          e_pos=pos.get(min(e, hi), len(idxs) - 1),
+                          path=(trk.pos[max(a, lo):min(e, hi) + 1, j] * sign).round(2).tolist()))
+
+    frames = []
+    for i in idxs:
+        sc = scenes[i]
+        live = i_start <= i <= i_end
+        players, st = players_at(c, i, team)
+        exp = c.expected(st["dfn"], "out", st["ball"], trk.phase[i], st["pos"])
+        stage = ("Before the play" if i < i_start else ("During the play" if i <= i_end
+                 else "After the play: shown for context, nothing is computed"))
+        if live and i < peak:
+            stage += f", space peaks in {(peak - i) / core.FPS:.1f} s"
+        f = dict(i=i, clock=core.match_clock(trk, i), stage=stage, players=players, ball=r2(st["ball"]),
+                 exp=[[int(trk.player_ids[j]), round(float(x), 2), round(float(y), 2)]
+                      for j, (x, y) in zip(st["dfn"], exp) if not np.isnan(x)],
+                 pc=enc(sc["pc"]), live=bool(live), movers=sorted(sc["movers"]) if live else [])
+        if live:
+            f["created"] = enc(gains[i], gmax)
+            f["drag"] = [r2([ex[0], ex[1], now[0], now[1]]) + [d, m] for d, ex, now, m in sc["drag"]]
+            if gains[i].sum() >= core.LIVE_MIN_FRAC * gpeak and gpeak > 0:
+                ben = core.team_play_beneficiaries(c, tpd, i, sc["created"], sc["movers"])
+                if ben is not None:
+                    rk = ben["ranking"].head(5)
+                    f["bens"] = [dict(pid=int(r.player_id), name=str(r.name), x0=round(float(sc["P"][int(r.col), 0]), 2),
+                                      y0=round(float(sc["P"][int(r.col), 1]), 2), x1=round(float(r.tx), 2),
+                                      y1=round(float(r.ty), 2), share=round(float(r.share), 3),
+                                      t=round(float(r.time_s), 1), first=round(float(r.ease), 2),
+                                      ctrl=round(float(r.control_at_spot), 2), dmin=round(float(r.nearest_def_m), 1))
+                                 for r in rk.itertuples()]
+        if pass_row is not None and i_pass is not None and i >= i_pass:
+            f["pass"] = [round(float(pass_row.target_x), 2), round(float(pass_row.target_y), 2)]
+        frames.append(f)
+
+    marks = {}
+    for key, lab in ((i_start, "start"), (peak, "peak"), (i_pass if i_pass is not None and i_pass <= hi else i_end,
+                                                          "pass" if i_pass is not None else "end")):
+        if key in pos:
+            n = pos[key]
+            marks[n] = f"{marks[n]} / {lab}" if n in marks else lab
+    counts = {}
+    for m in abnormal:                       # one entry per player: "N. Blair (2 runs, 1 carry)"
+        pid, kind = int(core.RUNS.at[m, "player_id"]), str(core.RUNS.at[m, "kind"])
+        counts.setdefault(pid, {"run": 0, "carry": 0})["carry" if kind == "carry" else "run"] += 1
+    movers_txt = ", ".join(
+        f"{name(pid)} (" + ", ".join(f"{n} {w}{'s' if n > 1 else ''}" for w, n in c.items() if n) + ")"
+        for pid, c in counts.items())
+    n_pulled = len({int(d) for m in abnormal for d in core.RUNS.at[m, "dragged_ids"]})
+    summary = [f"**{core.team_names.get(team, '')}**, {core.match_clock(trk, i_start)} to {core.match_clock(trk, i_end)}",
+               (f"{len(counts)} player{'s' if len(counts) != 1 else ''} moving differently from the team: {movers_txt}"
+                if counts else "Nobody moved differently from the team in this play"),
+               "",
+               f"Defenders pulled out of position: **{n_pulled}**",
+               f"Space peaks at {core.match_clock(trk, peak)}",
+               (f"Ball played at {core.match_clock(trk, i_pass)}: {name(int(pass_row.player_id))} to "
+                f"{name(int(pass_row.target_id))}, {'completed' if pass_row.completed else 'not completed'}"
+                if pass_row is not None else "No pass: the play ends without one"),
+               "",
+               "Movers are not suggested as runners into the space; nor are centre-backs or keepers."]
+    return dict(kind="teamplay", key=dict(match=int(mid), team=team, frames=idxs),
+                title=f"{core.team_names.get(team, '')}: team play, {len(abnormal)} movement"
+                      f"{'s' if len(abnormal) != 1 else ''}",
+                grid=dict(xs=r2(g.xs), ys=r2(g.ys), nx=g.nx, ny=g.ny), frames=frames, marks=marks,
+                start=pos.get(i_start, 0), paths=paths, runner_path=[], a_pos=0, e_pos=0, movement=None, runner=None,
                 summary="  \n".join(summary), names={str(p): name(p) for p in core.mins.index},
                 roles={str(p): str(r) for p, r in core.mins["role"].items()})
 
@@ -226,16 +363,24 @@ def reach_for(key, pid):
 # ---------------------------------------------------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------------------------------------------------
+LIST_TABLE_STYLE = dict(
+    style_table={"width": "100%", "overflowX": "hidden"},
+    style_cell={"overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap", "maxWidth": 0,
+                "textAlign": "left", "padding": "6px 4px"},
+    css=[{"selector": "table", "rule": "table-layout: fixed; width: 100%;"}],
+)
+# ---------------------------------------------------------------------------------------------------------------------
 app = Dash(__name__, title="Space Creation Explorer", assets_folder=str(APP_DIR / "assets"))
 match_opts = [{"label": match_label(m), "value": m} for m in core.match_ids]
 
 PITCH_ITEMS = [("attackers", "Attacking players"), ("defenders", "Defending players"), ("ball", "Ball"),
                ("path", "Path of the movement")]
-LAYERS = [("pc", "Who controls the pitch"), ("created", "Space opened for teammates"), ("bens", "Where teammates should go"),
+LAYERS = [("links", "Lines from movers to the defenders they pull"), ("pc", "Who controls the pitch"),
+          ("bens_all", "Show every suggested run, not just the best"), ("created", "Space opened for teammates"), ("bens", "Where teammates should go"),
           ("drag", "Defenders pulled out of position"), ("prime", "Prime space (designed and open)"),
           ("designed", "Designed space (attack only)"), ("cover", "Is the vacated spot covered?"),
           ("expected", "Every defender's expected spot")]
-DEFAULT_LAYERS = ["attackers", "defenders", "ball", "path", "pc", "created", "bens", "drag", "cover"]
+DEFAULT_LAYERS = ["attackers", "defenders", "ball", "path", "links", "pc", "created", "bens", "drag", "cover"]
 
 app.layout = html.Div(className="shell", children=[
     html.Header(className="topbar", children=[
@@ -245,16 +390,42 @@ app.layout = html.Div(className="shell", children=[
     ]),
     html.Div(className="body", children=[
         html.Aside(className="rail", children=[
-            html.H2("Plays"),
+            dcc.Tabs(id="mode", value="team", className="mode-tabs", children=[
+                dcc.Tab(label="Team plays", value="team", className="mode-tab", selected_className="mode-tab--on"),
+                dcc.Tab(label="Individual movements", value="ind", className="mode-tab",
+                        selected_className="mode-tab--on")]),
             dcc.Checklist([{"label": "Off-ball runs", "value": "off_ball"}, {"label": "Carries", "value": "carry"}],
                           ["off_ball", "carry"], id="kinds", className="pills"),
             dcc.Checklist([{"label": "Opponent's half", "value": "opp"}, {"label": "Pulled a defender", "value": "drag"},
                            {"label": "Build-up", "value": "bu"}], ["opp", "drag", "bu"], id="filters", className="pills"),
-            dash_table.DataTable(id="plays", page_size=14, sort_action="native",
-                                 sort_by=[{"column_id": "clock", "direction": "asc"}],
-                                 columns=[{"name": "Player", "id": "player"}, {"name": "", "id": "kind"},
-                                          {"name": "Clock", "id": "clock"}, {"name": "Space", "id": "space"}],
-                                 style_as_list_view=True, style_data_conditional=[]),
+            dcc.Loading(type="circle", color="#1f7a6a", className="list-loading", children=[
+            html.Div(id="ind-wrap", children=[
+                dash_table.DataTable(id="plays", page_size=14, sort_action="native",
+                                     sort_by=[{"column_id": "clock", "direction": "asc"}],
+                                     columns=[{"name": "Team", "id": "team"}, {"name": "Player", "id": "player"},
+                                              {"name": "", "id": "kind"}, {"name": "Clock", "id": "clock"},
+                                              {"name": "Space", "id": "space"}],
+                                     style_cell_conditional=[
+                                         {"if": {"column_id": "team"}, "width": "27%"},
+                                         {"if": {"column_id": "player"}, "width": "29%"},
+                                         {"if": {"column_id": "kind"}, "width": "12%"},
+                                         {"if": {"column_id": "clock"}, "width": "18%"},
+                                         {"if": {"column_id": "space"}, "width": "14%", "textAlign": "right"}],
+                                     tooltip_duration=None,
+                                     style_as_list_view=True, style_data_conditional=[], **LIST_TABLE_STYLE)]),
+            html.Div(id="team-wrap", children=[
+                dash_table.DataTable(id="teamplays", page_size=14, sort_action="native",
+                                     sort_by=[{"column_id": "clock", "direction": "asc"}],
+                                     columns=[{"name": "Team", "id": "team"}, {"name": "Moves", "id": "moves"},
+                                              {"name": "Clock", "id": "clock"}, {"name": "Space", "id": "space"}],
+                                     style_cell_conditional=[
+                                         {"if": {"column_id": "team"}, "width": "40%"},
+                                         {"if": {"column_id": "moves"}, "width": "16%", "textAlign": "right"},
+                                         {"if": {"column_id": "clock"}, "width": "24%"},
+                                         {"if": {"column_id": "space"}, "width": "20%", "textAlign": "right"}],
+                                     style_as_list_view=True, style_data_conditional=[], **LIST_TABLE_STYLE)]),
+            html.Div(id="plays-status", className="plays-status"),
+            ]),
             html.Div(className="jump", children=[
                 html.Label("Go to a moment", htmlFor="clock"),
                 html.Div(className="jump-row", children=[dcc.Input(id="clock", placeholder="P1 12:34"),
@@ -265,10 +436,14 @@ app.layout = html.Div(className="shell", children=[
             html.Div(className="stage-head", children=[
                 html.Div(id="play-title", className="play-title", children="Pick a play from the list"),
                 html.Div(id="frame-title", className="frame-title"),
-                dcc.Loading(html.Div(id="load-status", className="load-status"), type="dot", color="#2a9d8f"),
             ]),
-            dcc.Graph(id="pitch", className="pitch", config=dict(displaylogo=False, scrollZoom=False,
-                                                                  modeBarButtonsToRemove=["select2d", "lasso2d"])),
+            html.Div(className="pitch-wrap", children=[
+                dcc.Graph(id="pitch", className="pitch", config=dict(displaylogo=False, scrollZoom=False,
+                                                                      modeBarButtonsToRemove=["select2d", "lasso2d"])),
+                # the spinner sits in the middle of the pitch while a play is computed
+                html.Div(className="pitch-spinner", children=dcc.Loading(
+                    html.Div(id="load-status", className="load-status"), type="circle", color="#1f7a6a")),
+            ]),
             html.Div(className="transport", children=[
                 html.Button("⏮", id="back", title="Back one frame"),
                 html.Button("Play", id="play", className="primary"),
@@ -316,24 +491,66 @@ def plays_for(mid, kinds, filters):
     if "bu" in filters:
         R = R[R.phase.isin(core.BUILDUP_PHASES)]
     R = R.sort_values("created_opp_half", ascending=False).head(300).sort_values(["period", "frame_start"])
-    trk = CTX.get(mid).trk
-    return [dict(id=int(k), player=name(r.player_id), kind="carry" if r.kind == "carry" else "run",
-                 clock=core.match_clock(trk, int(r.idx_start)), space=round(float(r.created_opp_half), 3))
+    return [dict(id=int(k), team=core.team_names.get(int(r.team_id), ""), player=name(r.player_id),
+                 kind="carry" if r.kind == "carry" else "run",
+                 clock=clock_of(mid, r.frame_start, r.period), space=round(float(r.created_opp_half), 3))
             for k, r in zip(R.index, R.itertuples())]
 
 
-@app.callback(Output("plays", "data"), Input("match", "value"), Input("kinds", "value"), Input("filters", "value"))
-def update_plays(mid, kinds, filters):
-    if mid is None:
+@lru_cache(maxsize=64)
+def teamplays_for(mid, kinds, filters):
+    T = team_plays_for_match(mid)
+    if not len(T):
         return []
-    return plays_for(int(mid), tuple(sorted(kinds or [])), tuple(sorted(filters or [])))
+    R = core.RUNS
+    keep = []
+    for k, t in T.iterrows():
+        m = R.loc[t.members]
+        m = m[m.kind.isin(kinds)]
+        if not len(m):
+            continue
+        if "opp" in filters and not m.attacking_half.any():
+            continue
+        if "drag" in filters and not (m.n_dragged > 0).any():
+            continue
+        if "bu" in filters and not m.phase.isin(core.BUILDUP_PHASES).any():
+            continue
+        keep.append(dict(id=f"{mid}:{k}", team=core.team_names.get(int(t.team_id), ""), moves=int(t.n_moves),
+                         clock=clock_of(mid, t.frame_start, t.period), space=round(float(t.space), 3)))
+    return keep
+
+
+@app.callback(Output("plays", "data"), Output("teamplays", "data"), Output("plays-status", "children"),
+              Input("match", "value"), Input("kinds", "value"), Input("filters", "value"), Input("mode", "value"))
+def update_plays(mid, kinds, filters, mode):
+    if mid is None:
+        return [], [], ""
+    k, f = tuple(sorted(kinds or [])), tuple(sorted(filters or []))
+    try:
+        ind = plays_for(int(mid), k, f)
+        team = teamplays_for(int(mid), k, f)
+    except Exception as exc:                       # never fail silently
+        return [], [], f"Couldn't build the list: {exc!r}"
+    n = len(team) if mode == "team" else len(ind)
+    what = "team play" if mode == "team" else "movement"
+    return ind, team, f"{n} {what}{'s' if n != 1 else ''} in this match"
+
+
+@app.callback(Output("ind-wrap", "style"), Output("team-wrap", "style"), Input("mode", "value"))
+def show_list(mode):
+    return ({"display": "none"}, {}) if mode == "team" else ({}, {"display": "none"})
 
 
 @app.callback(Output("playdata", "data"), Output("load-status", "children"), Output("selected", "data"),
-              Input("plays", "active_cell"), Input("go", "n_clicks"),
-              State("plays", "derived_viewport_data"), State("match", "value"), State("clock", "value"),
-              prevent_initial_call=True)
-def load_play(cell, _go, view, mid, clock):
+              Input("plays", "active_cell"), Input("teamplays", "active_cell"), Input("go", "n_clicks"),
+              State("plays", "derived_viewport_data"), State("teamplays", "derived_viewport_data"),
+              State("match", "value"), State("clock", "value"), prevent_initial_call=True)
+def load_play(cell, tcell, _go, view, tview, mid, clock):
+    if dash_ctx.triggered_id == "teamplays":
+        if not tcell or not tview or tcell["row"] >= len(tview):
+            return no_update, no_update, no_update
+        m, k = tview[tcell["row"]]["id"].split(":")
+        return precompute_teamplay(int(m), int(k)), "", None
     if dash_ctx.triggered_id == "go":
         try:
             trk = CTX.get(mid).trk
@@ -369,6 +586,8 @@ app.clientside_callback(ClientsideFunction("space", "render"),
                         Input("items", "value"), Input("selected", "data"), Input("reach", "data"))
 app.clientside_callback(ClientsideFunction("space", "highlightRow"), Output("plays", "style_data_conditional"),
                         Input("plays", "active_cell"), State("plays", "derived_viewport_data"))
+app.clientside_callback(ClientsideFunction("space", "highlightRow"), Output("teamplays", "style_data_conditional"),
+                        Input("teamplays", "active_cell"), State("teamplays", "derived_viewport_data"))
 app.clientside_callback(ClientsideFunction("space", "timeline"),
                         Output("frame", "max"), Output("frame", "marks"), Output("summary", "children"),
                         Output("play-title", "children"), Input("playdata", "data"))
