@@ -371,7 +371,11 @@ LIST_TABLE_STYLE = dict(
 )
 # ---------------------------------------------------------------------------------------------------------------------
 app = Dash(__name__, title="Space Creation Explorer", assets_folder=str(APP_DIR / "assets"))
-match_opts = [{"label": match_label(m), "value": m} for m in core.match_ids]
+POSE_GAMES = [1925299, 1996435]          # the two matches with body-pose data: listed first, first one opens by default
+scored = set(int(m) for m in core.RUNS.match_id.unique())
+order = [m for m in POSE_GAMES if m in core.match_ids] + [m for m in core.match_ids if m not in POSE_GAMES]
+match_opts = [{"label": match_label(m) + (" (pose)" if m in POSE_GAMES else ""), "value": m}
+              for m in order if m in scored]
 
 PITCH_ITEMS = [("attackers", "Attacking players"), ("defenders", "Defending players"), ("ball", "Ball"),
                ("path", "Path of the movement")]

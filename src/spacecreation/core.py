@@ -104,7 +104,7 @@ TEAMPLAY_LEAD_S = 1.0
 
 TEAMPLAY_BUFFER_S = 1.0
 
-RUN_MIN_SPEED = 4.0
+RUN_MIN_SPEED = 5.0
 
 RUN_MIN_FRAMES = 7
 
@@ -1275,9 +1275,19 @@ TARGET_MIN_CONTROL = 0.5
 
 DEF_CLEAR_M = 3.0
 
+OPEN_SCALE_M = 6.0
+
 TEAM_CLEAR_M = 3.0
 
 CROWD_FACTOR = 0.2
+
+W_SPACE = 1.0
+
+W_VALUE = 1.0
+
+W_FREE = 2.0
+
+W_REACH = 1.0
 
 def find_beneficiary(ctx, run, i, created, exclude_pids=()) -> dict | None:
     """Teammates who can use the opened space. Each spot counts by
@@ -1296,10 +1306,11 @@ def find_beneficiary(ctx, run, i, created, exclude_pids=()) -> dict | None:
     mover = [k for k in st["att"] if trk.player_ids[k] == run.player_id]
     mates = np.array([k for k in st["att"] if k not in mover])
     pc = pitch_control(P[mates], V[mates], P[st["dfn"]], V[st["dfn"]], ball, pts)
-    free = np.clip((pc - TARGET_MIN_CONTROL) / (1 - TARGET_MIN_CONTROL), 0, 1)
+    control_free = np.clip((pc - TARGET_MIN_CONTROL) / (1 - TARGET_MIN_CONTROL), 0, 1)
     d_def = np.linalg.norm(pts[None] - P[st["dfn"]][:, None], axis=-1).min(0)
-    free = free * (d_def >= DEF_CLEAR_M)
-    gain = np.clip(created, 0, None) * ctx.value_grid * free
+    openness = np.clip((d_def - DEF_CLEAR_M) / (OPEN_SCALE_M - DEF_CLEAR_M), 0, 1)   # 0 within 3 m, 1 from 6 m
+    free = control_free * openness
+    gain = (np.clip(created, 0, None) ** W_SPACE) * (ctx.value_grid ** W_VALUE) * (free ** W_FREE)
     if gain.sum() <= 0:
         return None                                                   # space opened, but none of it is usable now
     t_att = arrival_times(P[att], V[att], pts)
@@ -1308,7 +1319,7 @@ def find_beneficiary(ctx, run, i, created, exclude_pids=()) -> dict | None:
     near = np.linalg.norm(pts[None] - P[att][:, None], axis=-1) < TEAM_CLEAR_M   # (teammates, cells)
     others_there = near.sum(0)[None] - near                            # other teammates already at each spot
     crowd = np.where(others_there > 0, CROWD_FACTOR, 1.0)
-    score = ease * gain[None] * crowd
+    score = (ease ** W_REACH) * gain[None] * crowd
     benefit = score.sum(1) * ctx.grid.cell_area
     if benefit.max() <= 0:
         return None
