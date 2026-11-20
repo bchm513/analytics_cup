@@ -1,15 +1,15 @@
 # Space Creation in Build-Up Play
- 
+
 **PySport Analytics Cup 2.0, football track** · SkillCorner A-League 2024/25 tracking, events and body-pose data
- 
+
 Who makes space, who finds it, and who feeds it. This project measures the space that off-ball runs and carries open
 for teammates, by comparing where defenders are with where they *should* be, and shows who could use that space and
 where they should go. It has two notebooks and an interactive dashboard.
- 
+
 ---
- 
+
 ## What's in the project
- 
+
 ```
 analytics-cup-football/
 ├── notebooks/
@@ -32,15 +32,15 @@ analytics-cup-football/
 ├── requirements.txt
 └── LICENSE.md
 ```
- 
+
 ---
- 
+
 ## Setup (once)
- 
+
 ### 1. Data
- 
+
 Clone SkillCorner's open data into `data/opendata` and fetch the tracking files with Git LFS:
- 
+
 ```
 cd "C:\path\to\analytics-cup-football\data"
 git clone https://github.com/SkillCorner/opendata.git
@@ -48,75 +48,75 @@ cd opendata
 git lfs install
 git lfs pull
 ```
- 
+
 Each `matches/<id>/<id>_tracking_extrapolated.jsonl` should be around 100 MB. A file of about 130 bytes is only an LFS
 pointer: run `git lfs pull` again.
- 
+
 **Body pose (optional, two matches):** download `raw/1925299.jsonl.zip` and `raw/1996435.jsonl.zip` from the
 `SkillCorner/opendata-bodypose` dataset on Hugging Face into `data/opendata/data/bodypose/raw/` (about 600 MB each;
 leave them zipped). Without them the analysis notebook falls back to the 12-second sample.
- 
+
 ### 2. Environment
- 
+
 Use the Anaconda environment (Anaconda Prompt, or select the `anaconda3` interpreter in VS Code) and install the extras:
- 
+
 ```
 pip install -r requirements.txt
 ```
- 
+
 or, at minimum:
- 
+
 ```
 pip install dash plotly nbformat nbconvert huggingface_hub
 ```
- 
+
 numpy, pandas, scipy, scikit-learn and matplotlib come with Anaconda.
- 
+
 ---
- 
+
 ## Running it
- 
+
 From the Anaconda Prompt, in the project folder (keep the quotes; the path has spaces):
- 
+
 ```
 cd "C:\path\to\analytics-cup-football"
 ```
- 
+
 **1. Definitions notebook** (all the scoring; 30–45 min on a rescore, a few minutes when cached)
- 
+
 ```
 jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 notebooks\space_creation.ipynb
 ```
- 
+
 **2. Sync the dashboard's code with the notebook**
- 
+
 ```
 python scripts\extract_core.py
 ```
- 
+
 **3. Analysis notebook** (reads saved results; nothing is recomputed)
- 
+
 ```
 jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 notebooks\space_analysis.ipynb
 ```
- 
+
 **4. Dashboard**
- 
+
 ```
 python app\dashboard.py
 ```
- 
+
 Open http://127.0.0.1:8050 and stop it with Ctrl+C. Options: `--port 8060`, `--root path\to\analytics-cup-football`.
- 
+
 Running cell by cell in VS Code or Jupyter (`jupyter lab`) works the same way, in this order. Add `--allow-errors` to
 the nbconvert commands to keep going past a failing cell.
- 
+
 ---
- 
+
 ## The two notebooks
- 
+
 **`space_creation.ipynb` (definitions)**
- 
+
 | Section | What it does |
 |---|---|
 | 1 | Settings and caching switches |
@@ -129,24 +129,28 @@ the nbconvert commands to keep going past a failing cell.
 | 9–11 | Occupier, feeder and space-behind-the-line metrics; the per-match pipeline |
 | 12 | Taxonomy; saves `data/outputs/runs_enriched.pkl` |
 | 13 | Shared helpers (definitions only): beneficiaries, scenes, team plays, lens overlap |
- 
+
 **`space_analysis.ipynb` (analysis on top)**
- 
+
 | Section | What it does |
 |---|---|
 | 1 | Setup and review settings (`REVIEW_NAME`, `REBUILD_REVIEW`) |
 | 2 | Designed vs real space; what works against which defensive phase |
 | 3 | Body orientation (pose) |
 | 4 | Space created vs SkillCorner run xThreat: agreement vs pure decoys (`figures/xthreat/`) |
-| 5 | Validation against SkillCorner Game Intelligence |
+| 5 | Validation: does the ball go to the predicted runner, agreement with SkillCorner (passing options, runs, dangerous runs, line flags), pass and possession outcomes, expected-spot accuracy vs baselines, placebo moments, split-half stability, threshold sensitivity |
 | 6 | Leaderboards and team comparison |
 | 7 | Case studies, showcase and "more like this" (`figures/cases/`, `figures/showcase/`) |
-| 8 | Blind review sample and scoring (`figures/<REVIEW_NAME>/review.html`) |
- 
+| 8 | Blind review sample and scoring, with Cohen's kappa when a second reviewer fills `review_sheet_reviewer2.csv` |
+| 9 | Validation scorecard (`data/outputs/validation_scorecard.csv`, `figures/validation/scorecard.png`) and the per-movement checks the dashboard reads (`data/outputs/validation_runs.pkl`) |
+
+The validation section's heavy pass (one scene per movement at its next pass, plus placebo and sensitivity reruns) is
+cached in `data/outputs/validation_pass_<PIPELINE_VERSION>.pkl`; set `VAL_REBUILD = True` in Section 5.2 to redo it.
+
 ---
- 
+
 ## The dashboard
- 
+
 - **Two tabs.** *Team plays* groups every movement by one team in the same moment of play (until the first pass);
   *Individual movements* lists runs and carries one by one. Pick a match (the two pose games are listed first), filter,
   and click any row.
@@ -158,12 +162,20 @@ the nbconvert commands to keep going past a failing cell.
 - **Click a player:** attackers show where they can get before the quickest defender; defenders show how far they are
   from their expected spot. Click again to clear.
 - The table under the pitch shows who should go where at the current frame.
+- **Verify against known examples.** The dropdown under the filters lists only movements with an outside check:
+  matched to a SkillCorner run, SkillCorner "dangerous", SkillCorner pushed/broke the line, next pass reached (or
+  missed) the predicted runner, predicted runner was a SkillCorner passing option, in the blind review, or the blind
+  review disagreed with the model. While verifying, the other filters are ignored. The *Check* column tags each row
+  (SK, ★ dangerous, L line, ✓/✗ next pass, R reviewed), *This play* lists the checks, and two *Verify* layers draw
+  SkillCorner's own run (dotted arrow) and its passing options (amber diamonds). The next-pass and review checks need
+  the analysis notebook's Section 9 to have run (`validation_runs.pkl`); restart the dashboard afterwards.
+
 ---
- 
+
 ## Settings and caching
- 
+
 The main settings are in Section 1 of `space_creation.ipynb`.
- 
+
 | Setting | Current | Meaning |
 |---|---|---|
 | `RUN_MIN_SPEED` | 2.24 m/s (5 mph) | speed to count as running (m/s; km/h ÷ 3.6) |
@@ -174,27 +186,27 @@ The main settings are in Section 1 of `space_creation.ipynb`.
 | `TEAMPLAY_JOIN_S` | 1.0 s | a movement joins a team play if it starts within this of the play's end |
 | `PIPELINE_VERSION` | v6 | results are cached per version |
 | `BASELINE_VERSION` | shape-v1 | the expected-position model is cached per version |
- 
+
 The beneficiary weights (`W_SPACE`, `W_VALUE`, `W_FREE`, `W_REACH`, `OPEN_SCALE_M`) are in Section 13. They only
 affect the visuals and need no rescore.
- 
+
 **What to rerun after a change**
- 
+
 | Changed | Do this |
 |---|---|
 | Visuals, beneficiary weights, taxonomy | Run the notebook (cached, minutes), `extract_core.py`, restart the dashboard |
 | Run speed, drag rules, scoring code | `RERUN_PIPELINE = True` once (or a new `PIPELINE_VERSION`), then as above |
 | Expected positions, roles, phases, match list | `REBUILD_BASELINE = True` and `RERUN_PIPELINE = True` once |
 | New blind-review sample | A new `REVIEW_NAME` in the analysis notebook (keeps the old answers) |
- 
+
 Set the switches back to `False` afterwards. Restarting the kernel is safe: everything slow is cached on disk.
 `MATCH_IDS = [1925299, 1996435]` runs only the pose games as a quick test; the baseline is then fitted on one other
 game only, so use all 20 matches for real results.
- 
+
 ---
- 
+
 ## Troubleshooting
- 
+
 | Problem | Fix |
 |---|---|
 | `UnicodeDecodeError ... 'charmap'` | Run with Anaconda's Python, or `python -X utf8 ...` |
@@ -203,13 +215,14 @@ game only, so use all 20 matches for real results.
 | Dashboard shows old behaviour | `python scripts\extract_core.py`, restart, hard-refresh the browser (Ctrl+F5) |
 | A notebook can't find the data | Run it from `notebooks/` (nbconvert does this automatically) |
 | Tracking files ~130 bytes | Git LFS pointers: `git lfs pull` in `data/opendata` |
- 
+
 ---
- 
+
 ## Data and references
- 
+
 - SkillCorner open data, A-League 2024/25: tracking (broadcast, 10 fps), Dynamic Events, phases of play, body pose.
 - Fernández & Bornn (2018), *Wide Open Spaces*: pitch control and space value.
 - Mendes-Neves et al. (2025), *A Neighbor-based Approach to Pitch Ownership Models in Soccer*: uncertainty and model
   disagreement behind the defensive line.
+
 Keep these out of git (`.gitignore`): `data/opendata/`, `data/cache/`, `data/outputs/`, `figures/review*/`.

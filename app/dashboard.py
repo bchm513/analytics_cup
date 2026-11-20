@@ -17,6 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from dash import ClientsideFunction, Dash, Input, Output, State, dash_table, dcc, html, no_update
 from dash import ctx as dash_ctx
 
@@ -32,8 +33,164 @@ parser.add_argument("--debug", action="store_true")
 args, _ = parser.parse_known_args()
 
 core = loader.init(args.root)
-CTX = loader.ContextCache(size=3) 
+CTX = loader.ContextCache(size=3)
 PLAYS: dict = {}
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Known examples to verify against: SkillCorner's own labels (always available) and, once the analysis notebook's
+# validation section has run, the next-pass test, passing-option check and blind-review verdicts
+# (data/outputs/validation_runs.pkl).
+# ---------------------------------------------------------------------------------------------------------------------
+def load_verify():
+    R = core.RUNS
+    ev = core.events_all
+    sk = ev[ev.event_type == "off_ball_run"][["match_id", "event_id", "event_subtype", "dangerous", "xthreat",
+                                               "push_defensive_line", "break_defensive_line", "x_start", "y_start",
+                                               "x_end", "y_end", "frame_start", "frame_end"]].copy()
+    sk["sk_event_id"] = sk.event_id.astype(str)
+    sk = sk.drop(columns="event_id").drop_duplicates(["match_id", "sk_event_id"])
+    left = R[["match_id"]].assign(sk_event_id=R.sk_event_id.astype(str)).reset_index()
+    m = left.merge(sk, on=["match_id", "sk_event_id"], how="left").set_index("index").reindex(R.index)
+    V = pd.DataFrame(index=R.index)
+    V["sk"] = R.sk_event_id.notna() & m.event_subtype.notna()
+    V["sk_subtype"] = m.event_subtype
+    V["sk_dangerous"] = m.dangerous.eq(True)
+    V["sk_push"] = m.push_defensive_line.eq(True)
+    V["sk_break"] = m.break_defensive_line.eq(True)
+    V["sk_xthreat"] = m.xthreat
+    for c in ("x_start", "y_start", "x_end", "y_end", "frame_start", "frame_end"):
+        V[f"sk_{c}"] = m[c]
+    path = core.OUT_DIR / "validation_runs.pkl"
+    if not path.exists():
+        return V, False
+    vr = pd.read_pickle(path)
+    keys = ["match_id", "player_id", "frame_start", "kind"]
+    extra = [c for c in vr.columns if c not in keys and c not in V.columns and not c.startswith("sk_")]
+    j = (R[keys].reset_index().merge(vr[keys + extra].drop_duplicates(keys), on=keys, how="left")
+         .set_index("index").reindex(R.index))
+    for c in extra:
+        V[c] = j[c]
+    return V, True
+
+
+VERIFY, HAS_VALIDATION = load_verify()
+
+
+def _yes(s):
+    return s.astype(str).str.strip().str.lower().str[0].eq("y")
+
+
+def _no(s):
+    return s.astype(str).str.strip().str.lower().str[0].eq("n")
+
+
+def verify_mask(key):
+    V = VERIFY
+    col = lambda c: V[c] if c in V else pd.Series(np.nan, index=V.index)
+    if key == "sk":
+        return V.sk
+    if key == "sk_dangerous":
+        return V.sk_dangerous
+    if key == "sk_line":
+        return V.sk_push | V.sk_break
+    if key == "hit":
+        return col("has_pass").eq(True) & col("hit_top1").eq(True)
+    if key == "miss":
+        return col("has_pass").eq(True) & col("ben_id").notna() & ~col("hit_top1").eq(True)
+    if key == "option":
+        return col("ben_is_option").eq(True)
+    if key == "review":
+        return col("review_case_id").notna()
+    if key == "review_bad":
+        return (_no(col("review_movement_real")) | _no(col("review_dragged_correct"))
+                | _no(col("review_beneficiary_correct")) | _yes(col("review_missed_defender")))
+    return pd.Series(True, index=V.index)
+
+
+VERIFY_OPTS = [("sk", "Matched to a SkillCorner run", False),
+               ("sk_dangerous", "SkillCorner: dangerous run", False),
+               ("sk_line", "SkillCorner: pushed or broke the defensive line", False),
+               ("hit", "Next pass reached the predicted runner", True),
+               ("miss", "Next pass went to someone else", True),
+               ("option", "Predicted runner was a SkillCorner passing option", True),
+               ("review", "In the blind review", True),
+               ("review_bad", "Blind review disagreed with the model", True)]
+
+
+def check_tags(idx):
+    """Short tags for the list: SK = SkillCorner run, ★ dangerous, L = pushed/broke the line, ✓/✗ next pass, R = reviewed."""
+    if idx not in VERIFY.index:
+        return ""
+    v = VERIFY.loc[idx]
+    t = []
+    if v.sk:
+        t.append("SK" + ("★" if v.sk_dangerous else ""))
+    if v.sk_push or v.sk_break:
+        t.append("L")
+    if v.get("has_pass") is True or v.get("has_pass") == 1:
+        if pd.notna(v.get("ben_id")):
+            t.append("✓" if v.get("hit_top1") in (True, 1) else "✗")
+    if pd.notna(v.get("review_case_id", np.nan)):
+        t.append("R")
+    return " ".join(t)
+
+
+def verify_lines(run):
+    """Checks against known examples for one movement, for the 'This play' panel."""
+    idx = int(run.Index)
+    if idx not in VERIFY.index:
+        return []
+    v = VERIFY.loc[idx]
+    out = ["", "**Checks against known examples**"]
+    if v.sk:
+        flags = [f for f, ok in (("pushed the defensive line", v.sk_push), ("broke the defensive line", v.sk_break)) if ok]
+        out.append(f"SkillCorner: {str(v.sk_subtype).replace('_', ' ')} run"
+                   + (", dangerous" if v.sk_dangerous else "")
+                   + (f", xThreat {v.sk_xthreat:.3f}" if pd.notna(v.sk_xthreat) else "")
+                   + ("; " + " and ".join(flags) if flags else ""))
+    elif run.kind == "off_ball":
+        out.append("SkillCorner: not tagged as a run")
+    if not HAS_VALIDATION:
+        out.append("Next-pass and review checks: run the analysis notebook's validation section")
+        return out
+    if v.get("has_pass") in (True, 1) and pd.notna(v.get("receiver")):
+        rec = name(int(v.receiver))
+        if pd.notna(v.get("ben_id")):
+            ok = v.get("hit_top1") in (True, 1)
+            out.append(f"Next pass went to {rec}; the model's predicted runner was {name(int(v.ben_id))} "
+                       f"{'✓' if ok else '✗'}")
+            out.append("Predicted runner was " + ("" if v.get("ben_is_option") in (True, 1) else "not ")
+                       + "a SkillCorner passing option")
+        else:
+            out.append(f"Next pass went to {rec}; no usable space for a prediction at that moment")
+    elif run.n_dragged > 0:
+        out.append(f"No pass within {3:g} s of the movement ending")
+    if pd.notna(v.get("review_case_id", np.nan)):
+        bits = [f"{lab} {str(v.get(c)).strip()[:1] or '?'}" for c, lab in
+                (("review_movement_real", "movement real"), ("review_dragged_correct", "pulled defenders"),
+                 ("review_missed_defender", "missed a defender"), ("review_beneficiary_correct", "runner into space"))
+                if pd.notna(v.get(c, np.nan))]
+        note = v.get("review_notes", np.nan)
+        out.append(f"Blind review {v.review_case_id}: " + (", ".join(bits) if bits else "not answered yet")
+                   + (f" — {note}" if isinstance(note, str) and note.strip() else ""))
+    return out
+
+
+@lru_cache(maxsize=64)
+def options_by(mid, team):
+    po = core.events_all[(core.events_all.event_type == "passing_option") & (core.events_all.match_id == mid)
+                         & (core.events_all.team_id == team)]
+    return po[["player_id", "frame_start", "frame_end"]].dropna().astype(int).values
+
+
+def options_at(mid, team, frame, tol=5):
+    """Players SkillCorner tags as a passing option at this frame (within tol frames)."""
+    o = options_by(int(mid), int(team))
+    if not len(o):
+        return []
+    m = (o[:, 1] - tol <= frame) & (o[:, 2] + tol >= frame)
+    return sorted(set(int(p) for p in o[m, 0]))
 
 
 def name(pid):
@@ -148,6 +305,7 @@ def precompute_play(idx):
                 f["cover"] = [round(float(vac["spot"][0]), 2), round(float(vac["spot"][1]), 2), core.COVER_R, vac["cover"]]
         if cut is not None and i >= cut and pinfo:
             f["pass"] = r2(pinfo["target"])
+        f["opts"] = options_at(play["match"], team, int(trk.frames[i]))
         frames.append(f)
 
     pos = {i: k for k, i in enumerate(idxs)}
@@ -172,7 +330,15 @@ def precompute_play(idx):
                (f"Ball played at {core.match_clock(trk, pinfo['idx'])}: {name(pinfo['passer'])} to "
                 f"{name(pinfo['receiver'])}, {timing}, {'completed' if pinfo['completed'] else 'not completed'}"
                 if pinfo else "No pass in this window")]
-    return dict(kind="play", key=dict(match=play["match"], team=team, frames=idxs), title=f"{name(run.player_id)}: {kind}",
+    summary += verify_lines(run)
+    sk_run = None
+    if int(run.Index) in VERIFY.index and VERIFY.at[int(run.Index), "sk"]:
+        v = VERIFY.loc[int(run.Index)]
+        f0 = int(trk.idx(int(v.sk_frame_start)))
+        sk_run = dict(x0=float(v.sk_x_start), y0=float(v.sk_y_start), x1=float(v.sk_x_end), y1=float(v.sk_y_end),
+                      pos=pos.get(f0, 0) if f0 >= idxs[0] else 0,
+                      label=f"SkillCorner: {str(v.sk_subtype).replace('_', ' ')} run")
+    return dict(kind="play", sk_run=sk_run, key=dict(match=play["match"], team=team, frames=idxs), title=f"{name(run.player_id)}: {kind}",
                 grid=dict(xs=r2(g.xs), ys=r2(g.ys), nx=g.nx, ny=g.ny), frames=frames, marks=marks,
                 start=pos.get(a, 0), runner_path=path, a_pos=pos.get(a, 0), e_pos=pos.get(e, len(idxs) - 1),
                 movement="carry" if run.kind == "carry" else "run", runner=int(run.player_id),
@@ -279,6 +445,7 @@ def precompute_teamplay(mid, k):
                                  for r in rk.itertuples()]
         if pass_row is not None and i_pass is not None and i >= i_pass:
             f["pass"] = [round(float(pass_row.target_x), 2), round(float(pass_row.target_y), 2)]
+        f["opts"] = options_at(mid, team, int(trk.frames[i]))
         frames.append(f)
 
     marks = {}
@@ -306,6 +473,12 @@ def precompute_teamplay(mid, k):
                 if pass_row is not None else "No pass: the play ends without one"),
                "",
                "Movers are not suggested as runners into the space; nor are centre-backs or keepers."]
+    sk_n = int(VERIFY.loc[[m for m in abnormal if m in VERIFY.index], "sk"].sum()) if abnormal else 0
+    hits = [m for m in abnormal if verify_mask("hit").get(m, False)]
+    summary += ["", "**Checks against known examples**",
+                f"{sk_n} of {len(abnormal)} movements matched to a SkillCorner run"]
+    if HAS_VALIDATION:
+        summary.append(f"Next pass reached a mover's predicted runner: {len(hits)} movement{'s' if len(hits) != 1 else ''}")
     return dict(kind="teamplay", key=dict(match=int(mid), team=team, frames=idxs),
                 title=f"{core.team_names.get(team, '')}: team play, {len(abnormal)} movement"
                       f"{'s' if len(abnormal) != 1 else ''}",
@@ -366,19 +539,20 @@ def reach_for(key, pid):
 LIST_TABLE_STYLE = dict(
     style_table={"width": "100%", "overflowX": "hidden"},
     style_cell={"overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap", "maxWidth": 0,
-                "textAlign": "left", "padding": "6px 4px"},
+                "textAlign": "left", "padding": "6px 3px", "fontSize": "13px"},
     css=[{"selector": "table", "rule": "table-layout: fixed; width: 100%;"}],
 )
 # ---------------------------------------------------------------------------------------------------------------------
 app = Dash(__name__, title="Space Creation Explorer", assets_folder=str(APP_DIR / "assets"))
-POSE_GAMES = [1925299, 1996435]          # the two matches with body-pose data: listed first, first one opens by default
-scored = set(int(m) for m in core.RUNS.match_id.unique())
-order = [m for m in POSE_GAMES if m in core.match_ids] + [m for m in core.match_ids if m not in POSE_GAMES]
+POSE_GAMES = [1925299, 1996435]          # the two matches with body-pose data: listed first
+_scored = set(int(m) for m in core.RUNS.match_id.unique())
+_order = [m for m in POSE_GAMES if m in core.match_ids] + [m for m in core.match_ids if m not in POSE_GAMES]
 match_opts = [{"label": match_label(m) + (" (pose)" if m in POSE_GAMES else ""), "value": m}
-              for m in order if m in scored]
+              for m in _order if m in _scored]
 
 PITCH_ITEMS = [("attackers", "Attacking players"), ("defenders", "Defending players"), ("ball", "Ball"),
                ("path", "Path of the movement")]
+VERIFY_LAYERS = [("sk_run", "SkillCorner's run (start → end)"), ("sk_options", "SkillCorner's passing options")]
 LAYERS = [("links", "Lines from movers to the defenders they pull"), ("pc", "Who controls the pitch"),
           ("bens_all", "Show every suggested run, not just the best"), ("created", "Space opened for teammates"), ("bens", "Where teammates should go"),
           ("drag", "Defenders pulled out of position"), ("prime", "Prime space (designed and open)"),
@@ -402,33 +576,42 @@ app.layout = html.Div(className="shell", children=[
                           ["off_ball", "carry"], id="kinds", className="pills"),
             dcc.Checklist([{"label": "Opponent's half", "value": "opp"}, {"label": "Pulled a defender", "value": "drag"},
                            {"label": "Build-up", "value": "bu"}], ["opp", "drag", "bu"], id="filters", className="pills"),
+            dcc.Dropdown([{"label": lab + ("" if (HAS_VALIDATION or not needs) else "  (run the validation section)"),
+                           "value": k, "disabled": bool(needs and not HAS_VALIDATION)} for k, lab, needs in VERIFY_OPTS],
+                         None, id="verify", clearable=True, placeholder="Verify against known examples…",
+                         className="verify-select"),
             dcc.Loading(type="circle", color="#1f7a6a", className="list-loading", children=[
             html.Div(id="ind-wrap", children=[
                 dash_table.DataTable(id="plays", page_size=14, sort_action="native",
                                      sort_by=[{"column_id": "clock", "direction": "asc"}],
                                      columns=[{"name": "Team", "id": "team"}, {"name": "Player", "id": "player"},
                                               {"name": "", "id": "kind"}, {"name": "Clock", "id": "clock"},
-                                              {"name": "Space", "id": "space"}],
+                                              {"name": "Space", "id": "space"}, {"name": "Check", "id": "check"}],
                                      style_cell_conditional=[
-                                         {"if": {"column_id": "team"}, "width": "27%"},
-                                         {"if": {"column_id": "player"}, "width": "29%"},
-                                         {"if": {"column_id": "kind"}, "width": "12%"},
-                                         {"if": {"column_id": "clock"}, "width": "18%"},
-                                         {"if": {"column_id": "space"}, "width": "14%", "textAlign": "right"}],
+                                         {"if": {"column_id": "team"}, "width": "17%"},
+                                         {"if": {"column_id": "player"}, "width": "23%"},
+                                         {"if": {"column_id": "kind"}, "width": "11%"},
+                                         {"if": {"column_id": "clock"}, "width": "19%"},
+                                         {"if": {"column_id": "space"}, "width": "13%", "textAlign": "right"},
+                                         {"if": {"column_id": "check"}, "width": "17%"}],
                                      tooltip_duration=None,
                                      style_as_list_view=True, style_data_conditional=[], **LIST_TABLE_STYLE)]),
             html.Div(id="team-wrap", children=[
                 dash_table.DataTable(id="teamplays", page_size=14, sort_action="native",
                                      sort_by=[{"column_id": "clock", "direction": "asc"}],
                                      columns=[{"name": "Team", "id": "team"}, {"name": "Moves", "id": "moves"},
-                                              {"name": "Clock", "id": "clock"}, {"name": "Space", "id": "space"}],
+                                              {"name": "Clock", "id": "clock"}, {"name": "Space", "id": "space"},
+                                              {"name": "Check", "id": "check"}],
                                      style_cell_conditional=[
-                                         {"if": {"column_id": "team"}, "width": "40%"},
-                                         {"if": {"column_id": "moves"}, "width": "16%", "textAlign": "right"},
-                                         {"if": {"column_id": "clock"}, "width": "24%"},
-                                         {"if": {"column_id": "space"}, "width": "20%", "textAlign": "right"}],
+                                         {"if": {"column_id": "team"}, "width": "33%"},
+                                         {"if": {"column_id": "moves"}, "width": "14%", "textAlign": "right"},
+                                         {"if": {"column_id": "clock"}, "width": "20%"},
+                                         {"if": {"column_id": "space"}, "width": "16%", "textAlign": "right"},
+                                         {"if": {"column_id": "check"}, "width": "17%"}],
                                      style_as_list_view=True, style_data_conditional=[], **LIST_TABLE_STYLE)]),
             html.Div(id="plays-status", className="plays-status"),
+            html.Div("Check: SK = SkillCorner run (★ dangerous), L = pushed/broke the line, ✓/✗ = next pass did/didn't "
+                     "reach the predicted runner, R = in the blind review", className="check-key"),
             ]),
             html.Div(className="jump", children=[
                 html.Label("Go to a moment", htmlFor="clock"),
@@ -471,6 +654,8 @@ app.layout = html.Div(className="shell", children=[
             html.H2("On the pitch"),
             dcc.Checklist([{"label": n, "value": k} for k, n in PITCH_ITEMS], [k for k, _ in PITCH_ITEMS], id="items",
                           className="layers"),
+            html.H2("Verify"),
+            dcc.Checklist([{"label": n, "value": k} for k, n in VERIFY_LAYERS], [], id="vlayers", className="layers"),
             html.H2("Layers"),
             dcc.Checklist([{"label": n, "value": k} for k, n in LAYERS],
                           [k for k in DEFAULT_LAYERS if k in dict(LAYERS)], id="layers", className="layers"),
@@ -486,8 +671,11 @@ app.layout = html.Div(className="shell", children=[
 # Server callbacks (only when something new must be computed)
 # ---------------------------------------------------------------------------------------------------------------------
 @lru_cache(maxsize=64)
-def plays_for(mid, kinds, filters):
+def plays_for(mid, kinds, filters, verify=None):
     R = core.RUNS[(core.RUNS.match_id == mid) & core.RUNS.kind.isin(kinds)]
+    if verify:                                    # verifying: only the known examples, other filters ignored
+        R = R[verify_mask(verify).reindex(R.index, fill_value=False)]
+        filters = ()
     if "opp" in filters:
         R = R[R.attacking_half]
     if "drag" in filters:
@@ -497,21 +685,27 @@ def plays_for(mid, kinds, filters):
     R = R.sort_values("created_opp_half", ascending=False).head(300).sort_values(["period", "frame_start"])
     return [dict(id=int(k), team=core.team_names.get(int(r.team_id), ""), player=name(r.player_id),
                  kind="carry" if r.kind == "carry" else "run",
-                 clock=clock_of(mid, r.frame_start, r.period), space=round(float(r.created_opp_half), 3))
+                 clock=clock_of(mid, r.frame_start, r.period), space=round(float(r.created_opp_half), 3),
+                 check=check_tags(k))
             for k, r in zip(R.index, R.itertuples())]
 
 
 @lru_cache(maxsize=64)
-def teamplays_for(mid, kinds, filters):
+def teamplays_for(mid, kinds, filters, verify=None):
     T = team_plays_for_match(mid)
     if not len(T):
         return []
     R = core.RUNS
+    vm = verify_mask(verify) if verify else None
+    if verify:
+        filters = ()
     keep = []
     for k, t in T.iterrows():
         m = R.loc[t.members]
         m = m[m.kind.isin(kinds)]
         if not len(m):
+            continue
+        if vm is not None and not vm.reindex(m.index, fill_value=False).any():
             continue
         if "opp" in filters and not m.attacking_half.any():
             continue
@@ -519,25 +713,33 @@ def teamplays_for(mid, kinds, filters):
             continue
         if "bu" in filters and not m.phase.isin(core.BUILDUP_PHASES).any():
             continue
+        tags = sorted({tag for i in m.index for tag in check_tags(i).split()},
+                      key=lambda x: ["SK", "SK★", "L", "✓", "✗", "R"].index(x) if x in ["SK", "SK★", "L", "✓", "✗", "R"] else 9)
         keep.append(dict(id=f"{mid}:{k}", team=core.team_names.get(int(t.team_id), ""), moves=int(t.n_moves),
-                         clock=clock_of(mid, t.frame_start, t.period), space=round(float(t.space), 3)))
+                         clock=clock_of(mid, t.frame_start, t.period), space=round(float(t.space), 3),
+                         check=" ".join(tags)))
     return keep
 
 
 @app.callback(Output("plays", "data"), Output("teamplays", "data"), Output("plays-status", "children"),
-              Input("match", "value"), Input("kinds", "value"), Input("filters", "value"), Input("mode", "value"))
-def update_plays(mid, kinds, filters, mode):
+              Input("match", "value"), Input("kinds", "value"), Input("filters", "value"), Input("mode", "value"),
+              Input("verify", "value"))
+def update_plays(mid, kinds, filters, mode, verify):
     if mid is None:
         return [], [], ""
     k, f = tuple(sorted(kinds or [])), tuple(sorted(filters or []))
     try:
-        ind = plays_for(int(mid), k, f)
-        team = teamplays_for(int(mid), k, f)
+        ind = plays_for(int(mid), k, f, verify)
+        team = teamplays_for(int(mid), k, f, verify)
     except Exception as exc:                       # never fail silently
         return [], [], f"Couldn't build the list: {exc!r}"
     n = len(team) if mode == "team" else len(ind)
     what = "team play" if mode == "team" else "movement"
-    return ind, team, f"{n} {what}{'s' if n != 1 else ''} in this match"
+    msg = f"{n} {what}{'s' if n != 1 else ''} in this match"
+    if verify:
+        lab = dict((a, b) for a, b, _ in VERIFY_OPTS).get(verify, verify)
+        msg += f" · verifying: {lab} (other filters ignored)"
+    return ind, team, msg
 
 
 @app.callback(Output("ind-wrap", "style"), Output("team-wrap", "style"), Input("mode", "value"))
@@ -587,7 +789,8 @@ app.clientside_callback(ClientsideFunction("space", "render"),
                         Output("pitch", "figure"), Output("moment", "children"), Output("frame-title", "children"),
                         Output("player-card", "children"),
                         Input("playdata", "data"), Input("frame", "value"), Input("layers", "value"),
-                        Input("items", "value"), Input("selected", "data"), Input("reach", "data"))
+                        Input("items", "value"), Input("vlayers", "value"), Input("selected", "data"),
+                        Input("reach", "data"))
 app.clientside_callback(ClientsideFunction("space", "highlightRow"), Output("plays", "style_data_conditional"),
                         Input("plays", "active_cell"), State("plays", "derived_viewport_data"))
 app.clientside_callback(ClientsideFunction("space", "highlightRow"), Output("teamplays", "style_data_conditional"),

@@ -121,3 +121,8 @@ button.primary { background: var(--teal-ink); border-color: var(--teal-ink); col
 /* Keep the plays lists inside their column */
 .rail .dash-table-container, .rail .dash-spreadsheet-container, .rail .dash-spreadsheet-inner { max-width: 100%; }
 .rail .dash-spreadsheet-inner td, .rail .dash-spreadsheet-inner th { font-size: 13px; }
+
+/* Verify against known examples */
+.verify-select { margin: 8px 0 4px; font-size: 13px; }
+.verify-select .Select-control { min-height: 32px; }
+.check-key { font-size: 11px; color: #6b7466; margin: 2px 0 6px; line-height: 1.35; }

@@ -81,12 +81,18 @@ function benTable(bens) {
 
 window.dash_clientside = Object.assign({}, window.dash_clientside, {
   space: {
-    render: function (data, k, layers, items, sel, reach) {
+    highlightRow: function (active, rows) {
+      // mark the clicked row in the play list (a DataTable keeps no selection of its own)
+      if (!active || !rows || !rows[active.row]) return [];
+      return [{if: {filter_query: `{id} = "${rows[active.row].id}"`}, backgroundColor: "rgba(43,106,148,0.14)",
+               fontWeight: 600}];
+    },
+    render: function (data, k, layers, items, vlayers, sel, reach) {
       if (!data || !data.frames || !data.frames.length) {
         return [emptyFigure(), benTable(null), "", "Pick a play from the list, or go to a moment by its match clock."];
       }
       k = Math.max(0, Math.min(k || 0, data.frames.length - 1));
-      const f = data.frames[k], g = data.grid, L = new Set((layers || []).concat(items || []));
+      const f = data.frames[k], g = data.grid, L = new Set((layers || []).concat(items || [], vlayers || []));
       const traces = [], anns = [], shapes = pitchShapes();
 
       if (L.has("pc") && f.pc) {
@@ -167,6 +173,20 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                      font: {size: n === 0 ? 13 : 11, color: C.ben, family: "Barlow Semi Condensed, sans-serif"},
                      bgcolor: "rgba(255,255,255,0.8)", borderpad: 2});
         });
+      }
+      // known examples: SkillCorner's own run (start -> end) and its passing options
+      if (L.has("sk_run") && data.sk_run && k >= data.sk_run.pos) {
+        const r = data.sk_run;
+        traces.push({type: "scatter", mode: "lines+markers", x: [r.x0, r.x1], y: [r.y0, r.y1], hoverinfo: "text",
+                     hovertext: r.label, line: {color: "rgba(60,60,60,0.75)", width: 2.5, dash: "dot"},
+                     marker: {size: [7, 0], color: "rgba(60,60,60,0.75)"}});
+        anns.push(arrowAnn(r.x0, r.y0, r.x1, r.y1, "rgba(60,60,60,0.75)", 2));
+      }
+      if (L.has("sk_options") && f.opts && f.opts.length) {
+        const os = f.players.filter(p => f.opts.includes(p[0]));
+        traces.push({type: "scatter", mode: "markers", x: os.map(p => p[2]), y: os.map(p => p[3]), hoverinfo: "text",
+                     hovertext: os.map(p => `${data.names[p[0]] || p[0]}: SkillCorner passing option`),
+                     marker: {symbol: "diamond-open", size: 30, color: "#d08a00", line: {width: 2.5}}});
       }
       if (f.pass) {
         traces.push({type: "scatter", mode: "markers", x: [f.pass[0]], y: [f.pass[1]], hoverinfo: "text",
